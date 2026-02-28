@@ -93,10 +93,16 @@ ADMIN_URL = f"{_API_BASE}/admin/applications"
 # Hashes are generated once and cached — bcrypt produces a new salt
 # on every call, so without caching the hash changes on each Streamlit
 # re-run and login always fails.
+# Using bcrypt directly — stauth.Hasher API changed across versions.
 # ---------------------------------------------------------------
+import bcrypt as _bcrypt
+
 @st.cache_data
 def get_hashed_passwords():
-    return stauth.Hasher(['admin123', 'user123']).generate()
+    return [
+        _bcrypt.hashpw(b"admin123", _bcrypt.gensalt()).decode(),
+        _bcrypt.hashpw(b"user123",  _bcrypt.gensalt()).decode(),
+    ]
 
 _hashed = get_hashed_passwords()
 
