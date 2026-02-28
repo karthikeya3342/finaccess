@@ -1,9 +1,11 @@
 import json
 import os
 import sqlite3
+import time as _time
 try:
     import psycopg2
     import psycopg2.extras
+    import psycopg2.pool
     HAS_PSYCOPG2 = True
 except ImportError:
     HAS_PSYCOPG2 = False
@@ -43,11 +45,32 @@ DATABASE_URL = os.getenv("DATABASE_URL")   # e.g. postgresql://user:pass@host/db
 DB_PATH      = "finaccess.db"              # only used when DATABASE_URL is absent
 USE_POSTGRES = bool(DATABASE_URL and HAS_PSYCOPG2)
 
+# Connection pool (Postgres only) — reuses connections instead of creating one per request.
+# ThreadedConnectionPool is thread-safe — safe to use with our ThreadPoolExecutor.
+_PG_POOL: "psycopg2.pool.ThreadedConnectionPool | None" = None
+_STARTUP_TIME = _time.time()
+
+def _get_pool():
+    """Lazily create and return the Postgres connection pool."""
+    global _PG_POOL
+    if _PG_POOL is None:
+        _PG_POOL = psycopg2.pool.ThreadedConnectionPool(
+            minconn=2, maxconn=20, dsn=DATABASE_URL
+        )
+    return _PG_POOL
+
 def _get_conn():
-    """Return a live DB connection — Postgres or SQLite depending on environment."""
+    """Return a DB connection — from pool (Postgres) or fresh (SQLite)."""
     if USE_POSTGRES:
-        return psycopg2.connect(DATABASE_URL)
+        return _get_pool().getconn()
     return sqlite3.connect(DB_PATH)
+
+def _put_conn(conn):
+    """Return a connection back to the pool (Postgres) or close it (SQLite)."""
+    if USE_POSTGRES:
+        _get_pool().putconn(conn)
+    else:
+        conn.close()
 
 def _ph():
     """Return the correct SQL placeholder string for the active driver."""
@@ -84,6 +107,7 @@ def init_db():
     conn.close()
     db_type = "PostgreSQL (persistent)" if USE_POSTGRES else "SQLite (local)"
     print(f"[DB] Initialised — using {db_type}")
+    _put_conn(conn)
 
 @app.on_event("startup")
 def load_assets():
@@ -226,6 +250,7 @@ def process_applicant(payload: ApplicantPayload) -> Dict[str, Any]:
     # Persist to database (PostgreSQL on Render, SQLite locally)
     decision = "Rejected" if final_risk >= 0.5 else "Approved"
     ph = _ph()
+    conn = None
     try:
         conn = _get_conn()
         cur  = conn.cursor()
@@ -255,9 +280,11 @@ def process_applicant(payload: ApplicantPayload) -> Dict[str, Any]:
             )
         conn.commit()
         cur.close()
-        conn.close()
     except Exception as db_err:
         print(f"DB insert failed for {loan_id}: {db_err}")
+    finally:
+        if conn:
+            _put_conn(conn)
 
     return result
 
@@ -286,8 +313,9 @@ async def score_applicant(payload: ApplicantPayload):
 def get_applications():
     """
     Admin endpoint — returns the 50 most recent scored applications.
-    Uses PostgreSQL on Render, SQLite locally.
+    Uses PostgreSQL connection pool on Render, SQLite locally.
     """
+    conn = None
     try:
         conn = _get_conn()
         if USE_POSTGRES:
@@ -304,10 +332,43 @@ def get_applications():
             )
             rows = [dict(r) for r in cur.fetchall()]
         cur.close()
-        conn.close()
         return rows
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if conn:
+            _put_conn(conn)
+
+
+@app.get("/health")
+def health_check():
+    """
+    Health check endpoint — returns system status, model load state, DB
+    connectivity, and uptime. Used by load balancers and monitoring tools.
+    """
+    uptime_seconds = round(_time.time() - _STARTUP_TIME, 1)
+    status = {
+        "status":          "ok",
+        "uptime_seconds":  uptime_seconds,
+        "db_backend":      "postgresql" if USE_POSTGRES else "sqlite",
+        "models": {
+            "xgb_model":      XGB_MODEL      is not None,
+            "shap_explainer": SHAP_EXPLAINER is not None,
+            "gcn_scores":     len(GCN_SCORES) > 0,
+            "preprocessor":   PREPROCESSOR   is not None,
+        },
+        "thread_pool_workers": 100,
+    }
+    # Quick DB ping
+    try:
+        conn = _get_conn()
+        conn.cursor().execute("SELECT 1")
+        _put_conn(conn)
+        status["db_connected"] = True
+    except Exception:
+        status["db_connected"] = False
+        status["status"] = "degraded"
+    return status
 
 
 if __name__ == "__main__":

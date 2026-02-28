@@ -66,31 +66,73 @@ df_raw_demographics['System_Decision'] = predictions
 # ==========================================
 # ⚖️ FAIRNESS AUDIT: GENDER
 # ==========================================
-print("\n" + "="*40)
-print(" ⚖️ FAIRNESS AUDIT: GENDER (MALE VS FEMALE)")
-print("="*40)
+print("=" * 40)
+print(" ⚖️  FAIRNESS AUDIT: GENDER (MALE VS FEMALE)")
+print("=" * 40)
 
-# Drop missing gender rows for clean math
 df_gender = df_raw_demographics.dropna(subset=['Gender'])
 
-male_total = len(df_gender[df_gender['Gender'] == 'Male'])
+male_total    = len(df_gender[df_gender['Gender'] == 'Male'])
 male_approved = len(df_gender[(df_gender['Gender'] == 'Male') & (df_gender['System_Decision'] == 'Approved')])
 male_approval_rate = male_approved / male_total if male_total > 0 else 0
 
-female_total = len(df_gender[df_gender['Gender'] == 'Female'])
+female_total    = len(df_gender[df_gender['Gender'] == 'Female'])
 female_approved = len(df_gender[(df_gender['Gender'] == 'Female') & (df_gender['System_Decision'] == 'Approved')])
 female_approval_rate = female_approved / female_total if female_total > 0 else 0
 
 print(f"Male Approval Rate:   {male_approval_rate*100:.1f}% ({male_approved}/{male_total})")
 print(f"Female Approval Rate: {female_approval_rate*100:.1f}% ({female_approved}/{female_total})")
 
-# Calculate Disparate Impact (Industry Standard Rule of 80%)
 if male_approval_rate > 0:
-    disparate_impact = female_approval_rate / male_approval_rate
-    print(f"\nDisparate Impact Ratio: {disparate_impact:.3f}")
-    if disparate_impact >= 0.80:
-        print("✅ PASSED: The system satisfies the EEOC 80% Rule for Demographic Parity.")
+    disparate_impact_gender = female_approval_rate / male_approval_rate
+    print(f"\nDisparate Impact Ratio (Gender): {disparate_impact_gender:.3f}")
+    if disparate_impact_gender >= 0.80:
+        print("✅ PASSED: The system satisfies the EEOC 80% Rule for Gender Parity.")
     else:
-        print("⚠️ WARNING: Potential bias detected. System flags female applicants at a disproportionately higher risk.")
-        
-print("="*40 + "\n")
+        print("⚠️  WARNING: Potential gender bias detected.")
+
+print("=" * 40 + "\n")
+
+# ==========================================
+# ⚖️ FAIRNESS AUDIT: PROPERTY AREA (URBAN vs RURAL)
+# ==========================================
+print("=" * 40)
+print(" ⚖️  FAIRNESS AUDIT: PROPERTY AREA (URBAN VS RURAL)")
+print("=" * 40)
+
+df_area = df_raw_demographics.dropna(subset=['Property_Area'])
+
+urban_total    = len(df_area[df_area['Property_Area'] == 'Urban'])
+urban_approved = len(df_area[(df_area['Property_Area'] == 'Urban') & (df_area['System_Decision'] == 'Approved')])
+urban_rate     = urban_approved / urban_total if urban_total > 0 else 0
+
+rural_total    = len(df_area[df_area['Property_Area'] == 'Rural'])
+rural_approved = len(df_area[(df_area['Property_Area'] == 'Rural') & (df_area['System_Decision'] == 'Approved')])
+rural_rate     = rural_approved / rural_total if rural_total > 0 else 0
+
+semi_total    = len(df_area[df_area['Property_Area'] == 'Semiurban'])
+semi_approved = len(df_area[(df_area['Property_Area'] == 'Semiurban') & (df_area['System_Decision'] == 'Approved')])
+semi_rate     = semi_approved / semi_total if semi_total > 0 else 0
+
+print(f"Urban     Approval Rate: {urban_rate*100:.1f}% ({urban_approved}/{urban_total})")
+print(f"Semiurban Approval Rate: {semi_rate*100:.1f}% ({semi_approved}/{semi_total})")
+print(f"Rural     Approval Rate: {rural_rate*100:.1f}% ({rural_approved}/{rural_total})")
+
+# Disparate Impact: Rural (unprivileged) vs Urban (privileged)
+if urban_rate > 0:
+    di_rural_vs_urban = rural_rate / urban_rate
+    print(f"\nDisparate Impact Ratio (Rural vs Urban): {di_rural_vs_urban:.3f}")
+    if di_rural_vs_urban >= 0.80:
+        print("✅ PASSED: Rural applicants meet the EEOC 80% Rule vs Urban applicants.")
+    else:
+        print("⚠️  WARNING: Potential geographic bias detected — rural applicants under-served.")
+
+if urban_rate > 0:
+    di_semi_vs_urban = semi_rate / urban_rate
+    print(f"Disparate Impact Ratio (Semiurban vs Urban): {di_semi_vs_urban:.3f}")
+    if di_semi_vs_urban >= 0.80:
+        print("✅ PASSED: Semiurban applicants meet the EEOC 80% Rule vs Urban applicants.")
+    else:
+        print("⚠️  WARNING: Semiurban applicants may be disadvantaged vs Urban.")
+
+print("=" * 40 + "\n")
