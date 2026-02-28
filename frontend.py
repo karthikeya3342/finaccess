@@ -142,9 +142,14 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------------
-# LOGIN WIDGET — new API: location is now the FIRST positional argument
+# LOGIN WIDGET — latest stauth (0.3.3+) returns None from login().
+# Auth state is stored in st.session_state automatically.
 # ---------------------------------------------------------------
-name, authentication_status, username = authenticator.login("main")
+authenticator.login("main")
+
+authentication_status = st.session_state.get("authentication_status")
+name                  = st.session_state.get("name")
+username              = st.session_state.get("username")
 
 # ---------------------------------------------------------------
 # POST-LOGIN: fill sidebar + gate access
