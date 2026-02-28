@@ -5,7 +5,8 @@ import random
 import json
 import numpy as np
 
-URL = "http://127.0.0.1:8000/score_applicant"
+# Live Render deployment endpoint
+URL = "https://finaccess-api.onrender.com/score_applicant"
 
 GENDERS         = ["Male", "Female"]
 MARRIED         = ["Yes", "No"]
@@ -52,9 +53,16 @@ def send_request(request_id: int):
         return str(e), time.time() - t0
 
 if __name__ == "__main__":
-    total_requests = 100
+    import argparse
+    parser = argparse.ArgumentParser(description="FinAccess Load Tester")
+    parser.add_argument("--users", type=int, default=100,
+                        help="Number of concurrent users (default: 100)")
+    args = parser.parse_args()
+
+    total_requests = args.users
     print(f"Firing {total_requests} concurrent requests with UNIQUE feature sets...")
     print(f"(No cache hits — each request forces a full SHAP computation)\n")
+
 
     start = time.time()
 

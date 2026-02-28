@@ -450,9 +450,9 @@ elif role == "admin":
         st.markdown("##### Load Testing Comparison")
         load_df = pd.DataFrame({
             "Concurrent Users":  [10, 50, 100],
-            "Avg Latency (ms)":  [350, 1820, 3036],
-            "P95 Latency (ms)":  [520, 4100, 5565],
-            "Throughput (RPS)":  [28,  18,   17],
+            "Avg Latency (ms)":  [1390, 4289, 3036],
+            "P95 Latency (ms)":  [1496, 4949, 5565],
+            "Throughput (RPS)":  [6.5,  9.9,   17.1],
         })
         st.dataframe(load_df, use_container_width=True, hide_index=True,
             column_config={
