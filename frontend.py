@@ -349,57 +349,83 @@ elif role == "admin":
                 progress_bar = st.progress(0, text="Initialising inference pipeline...")
                 t_start = _time.perf_counter()
 
-                # Simulate row-by-row processing with progress
+                # Real per-row inference — POST each row to /score_applicant
                 per_row_times = []
-                for i in range(n_rows):
+                ai_decisions  = []
+                risk_scores   = []
+                errors        = []
+
+                for i, (_, row) in enumerate(batch_df.iterrows()):
                     row_t0 = _time.perf_counter()
-                    _time.sleep(0.028)          # simulates ~28ms per request (SHAP included)
-                    per_row_times.append((_time.perf_counter() - row_t0) * 1000)  # ms
+                    loan_id = str(row.get("Loan_ID", f"BATCH_{i+1:04d}"))
+                    features = {col: row[col] for col in batch_df.columns
+                                if col != "Loan_ID"}
+                    try:
+                        resp = requests.post(
+                            BASE_URL,
+                            json={"loan_id": loan_id, "features": features},
+                            timeout=30
+                        )
+                        if resp.status_code == 200:
+                            result      = resp.json()
+                            risk_score  = result.get("Final_Risk_Score", 0.5)
+                            decision    = "✅ Approved" if risk_score < 0.5 else "❌ Rejected"
+                            errors.append("")
+                        else:
+                            risk_score = 0.5
+                            decision   = "⚠️ Error"
+                            errors.append(f"HTTP {resp.status_code}")
+                    except Exception as ex:
+                        risk_score = 0.5
+                        decision   = "⚠️ Error"
+                        errors.append(str(ex)[:60])
+
+                    per_row_times.append((_time.perf_counter() - row_t0) * 1000)
+                    ai_decisions.append(decision)
+                    risk_scores.append(round(risk_score, 4))
+
                     pct = int(((i + 1) / n_rows) * 100)
-                    progress_bar.progress(pct, text=f"Processing application {i+1}/{n_rows}...")
+                    progress_bar.progress(pct, text=f"Scoring application {i+1}/{n_rows}...")
 
                 t_elapsed = _time.perf_counter() - t_start
                 progress_bar.progress(100, text="✅ Complete")
 
-                # Compute real batch metrics
-                avg_latency_ms  = round(_np.mean(per_row_times), 1)
-                p95_latency_ms  = round(_np.percentile(per_row_times, 95), 1)
-                throughput_rps  = round(n_rows / t_elapsed, 1)
+                # Compute real batch metrics from measured latencies
+                avg_latency_ms = round(_np.mean(per_row_times),         1)
+                p95_latency_ms = round(_np.percentile(per_row_times, 95), 1)
+                throughput_rps = round(n_rows / t_elapsed,               1)
 
-                st.success(f"✅ Processed **{n_rows} applications** in **{t_elapsed:.2f} seconds**.")
+                success_count = sum(1 for d in ai_decisions if "Error" not in d)
+                st.success(f"✅ Processed **{success_count}/{n_rows} applications** in **{t_elapsed:.2f} seconds**.")
 
-                # Batch performance metrics
                 bm1, bm2, bm3 = st.columns(3)
                 with bm1:
                     st.metric("Batch Throughput", f"{throughput_rps} RPS",
                               delta=f"{n_rows} rows ÷ {t_elapsed:.2f}s")
                 with bm2:
                     st.metric("Avg Latency (per row)", f"{avg_latency_ms} ms",
-                              delta="SHAP + XGBoost included")
+                              delta="Real API latency measured")
                 with bm3:
                     st.metric("P95 Latency", f"{p95_latency_ms} ms",
                               delta="95th percentile")
 
-                # Build result preview with AI_Decision + Risk_Score for ALL rows
+                # Build result dataframe with real scores
                 preview_df = batch_df.copy()
-                # Deterministic but varied decisions based on row index
-                decisions = ["✅ Approved" if i % 3 != 0 else "❌ Rejected"
-                             for i in range(len(preview_df))]
-                risk_scores = [round(0.28 + (i * 0.09), 4) if i % 3 != 0
-                               else round(0.62 + (i * 0.03), 4)
-                               for i in range(len(preview_df))]
-                preview_df.insert(0, "AI_Decision", decisions)
-                preview_df.insert(1, "Risk_Score", risk_scores)
+                preview_df.insert(0, "AI_Decision", ai_decisions)
+                preview_df.insert(1, "Risk_Score",  risk_scores)
+                if any(errors):
+                    preview_df.insert(2, "Error", errors)
 
-                st.markdown(f"##### 🔎 All {n_rows} Results")
+                st.markdown(f"##### 🔎 All {n_rows} Results (Real Model Inference)")
                 st.dataframe(preview_df, use_container_width=True, hide_index=True,
-                    height=min(600, 38 + n_rows * 35),  # auto-size rows, cap at 600px
+                    height=min(600, 38 + n_rows * 35),
                     column_config={
                         "AI_Decision": st.column_config.TextColumn("AI Decision", width="medium"),
                         "Risk_Score":  st.column_config.ProgressColumn(
                             "Risk Score", format="%.4f", min_value=0, max_value=1),
                     }
                 )
+
 
 
     # ── TOP ROW: Feature 1 — System Performance Metrics ───────────────────
