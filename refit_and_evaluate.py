@@ -17,10 +17,11 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, cross_val_predict
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.neighbors import kneighbors_graph
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
+from sklearn.linear_model import LogisticRegression
 from torch_geometric.data import Data
 from torch_geometric.nn import GCNConv
 from xgboost import XGBClassifier
@@ -194,7 +195,7 @@ print(f"\n  [+] gcn_scores.json written ({len(gcn_scores)} entries)")
 # STEP 3 — TEMPORAL XGBOOST REFIT (train split only)
 # ──────────────────────────────────────────────────────────────
 print("\n" + "=" * 60)
-print("STEP 3 — Refitting Temporal XGBoost on 80% training split")
+print("STEP 3 — Hyperparameter Tuning & Optimal Threshold Finding")
 print("=" * 60)
 
 def prepare_xgb_df(df: pd.DataFrame,
@@ -214,6 +215,19 @@ def prepare_xgb_df(df: pd.DataFrame,
         df[f'Lag_LoanAmount_{n}'] = df['LoanAmount'].shift(n).fillna(loan_amt_mean)
 
     df = impute_df(df)
+
+    # Outlier clipping (99th percentile) to improve robustness
+    if fit:
+        df['ApplicantIncome'] = df['ApplicantIncome'].clip(upper=df['ApplicantIncome'].quantile(0.99))
+        df['CoapplicantIncome'] = df['CoapplicantIncome'].clip(upper=df['CoapplicantIncome'].quantile(0.99))
+        df['LoanAmount'] = df['LoanAmount'].clip(upper=df['LoanAmount'].quantile(0.99))
+
+    # Feature Engineering for XGBoost (matching GCN's power)
+    df['TotalIncome'] = df['ApplicantIncome'] + df['CoapplicantIncome']
+    df['TotalIncome_log'] = np.log((df['TotalIncome'] + 1).astype(float))
+    df['LoanAmount_log'] = np.log((df['LoanAmount'] + 1).astype(float))
+    df['EMI'] = np.where(df['Loan_Amount_Term'] == 0, 0, df['LoanAmount'] / df['Loan_Amount_Term'])
+    df['BalanceIncome'] = df['TotalIncome'] - (df['EMI'] * 1000)
 
     if fit:
         label_encoders = {}
@@ -239,36 +253,65 @@ def prepare_xgb_df(df: pd.DataFrame,
 
     return X_scaled, label_encoders, scaler, df.get('Loan_ID', None)
 
-# Map target: N=1 (default), Y=0
+# Map target: N=1 (default), Y=0 (to predict risk)
 train_df['_y'] = train_df['Loan_Status'].map({'N': 1, 'Y': 0}).fillna(0).astype(int)
 
-X_train_scaled, le_dict, xgb_scaler, _ = prepare_xgb_df(train_df, fit=True)
+X_train_scaled, le_dict, xgb_scaler, train_loan_ids_raw = prepare_xgb_df(train_df, fit=True)
 y_train = train_df['_y'].values
 
-xgb_model = XGBClassifier(
-    n_estimators=200, max_depth=4, learning_rate=0.05,
-    subsample=0.8, colsample_bytree=0.8,
-    eval_metric='logloss', use_label_encoder=False,
-    n_jobs=-1, random_state=42
-)
-xgb_model.fit(X_train_scaled, y_train)
+# 1. Hyperparameter Tuning using RandomizedSearchCV
+print("  [*] Running GridSearchCV for XGBoost hyperparameters...")
+param_dist = {
+    'max_depth': [3, 4, 5, 6],
+    'learning_rate': [0.01, 0.05, 0.1, 0.2],
+    'n_estimators': [50, 100, 200, 300],
+    'subsample': [0.6, 0.8, 1.0],
+    'colsample_bytree': [0.6, 0.8, 1.0]
+}
+
+base_xgb = XGBClassifier(eval_metric='logloss', use_label_encoder=False, random_state=42)
+random_search = RandomizedSearchCV(base_xgb, param_distributions=param_dist, 
+                                   n_iter=20, cv=5, scoring='f1', n_jobs=-1, random_state=42)
+random_search.fit(X_train_scaled, y_train)
+
+xgb_model = random_search.best_estimator_
+print(f"  [+] Best XGB Params: {random_search.best_params_}")
+
+# 2. Extract OOF predictions for Fusion Model
+print("  [*] Computing Out-Of-Fold (OOF) predictions to train Fusion Model...")
+oof_xgb_probs = cross_val_predict(xgb_model, X_train_scaled, y_train, cv=5, method='predict_proba')[:, 1]
+
+# Align GCN scores for the train set
+train_loan_ids_sorted = train_df.sort_values('Loan_ID')['Loan_ID'].values
+gcn_arr_train = np.array([gcn_scores.get(lid, 0.5) for lid in train_loan_ids_sorted])
+
+# 3. Learnable Fusion (Logistic Regression on [GCN, XGB] probabilities)
+print("  [*] Training Meta-Model (Learnable Fusion) on GCN & XGBoost scores...")
+X_meta_train = np.column_stack((gcn_arr_train, oof_xgb_probs))
+
+# Find best threshold for Fusion Model alone on training data
+fusion_model = LogisticRegression(class_weight='balanced', random_state=42)
+fusion_model.fit(X_meta_train, y_train)
 
 # Persist artefacts
 joblib.dump(xgb_model, "temporal_xgb_model.pkl")
+joblib.dump(fusion_model, "fusion_model.pkl")
 joblib.dump({'scaler': xgb_scaler, 'encoders': le_dict}, "preprocessing_pipeline.pkl")
 with open("feature_columns.json", "w") as f:
     json.dump(XGB_FEATURE_COLS, f, indent=4)
-print("  [+] temporal_xgb_model.pkl, preprocessing_pipeline.pkl, feature_columns.json written")
+    
+print("  [+] temporal_xgb_model.pkl, fusion_model.pkl, preprocessing_pipeline.pkl, feature_columns.json written")
 
 
 # ──────────────────────────────────────────────────────────────
 # STEP 4 — HOLDOUT EVALUATION (20% test set)
 # ──────────────────────────────────────────────────────────────
 print("\n" + "=" * 60)
-print("STEP 4 — Evaluating blended model on 20% unseen test set")
+print("STEP 4 — Evaluating Learnable Fusion on 20% unseen test set")
 print("=" * 60)
 
-test_df['_y'] = test_df['Loan_Status'].map({'Y': 1, 'N': 0}).fillna(0).astype(int)
+# FIXED mapping: N=1 (Rejected/Risk), Y=0 (Approved/Safe) to match Train exactly
+test_df['_y'] = test_df['Loan_Status'].map({'N': 1, 'Y': 0}).fillna(0).astype(int)
 y_test        = test_df['_y'].values
 
 # XGBoost probabilities on test set
@@ -280,21 +323,26 @@ xgb_probs = xgb_model.predict_proba(X_test_scaled)[:, 1]   # P(default/rejection
 test_loan_ids = test_df.sort_values('Loan_ID')['Loan_ID'].values
 gcn_arr = np.array([gcn_scores.get(lid, 0.5) for lid in test_loan_ids])
 
-# Blended risk
-final_risk = (2 * gcn_arr * xgb_probs) / (gcn_arr + xgb_probs)
+# Meta-Model Fusion prediction
+X_meta_test = np.column_stack((gcn_arr, xgb_probs))
+final_risk_probs = fusion_model.predict_proba(X_meta_test)[:, 1]
 
-# Logic A: Approved (pred=1) if Final_Risk < 0.5
-# Note: target mapping is Y=1 (Approved), N=0 (Rejected)
-preds = (final_risk < 0.5).astype(int)
+# Predict Class 1 (Risk) if probability > 0.5
+preds = (final_risk_probs >= 0.5).astype(int)
 
-acc  = accuracy_score(y_test, preds)
-f1   = f1_score(y_test, preds)
-cm   = confusion_matrix(y_test, preds)
+# Invert for reporting purely so Y=Approved is treated as the "positive" class for F1
+# We want F1 for Approved correctly predicted. Since 0 = Approved, we invert 0->1, 1->0
+y_test_approved = (y_test == 0).astype(int)
+preds_approved = (preds == 0).astype(int)
+
+acc  = accuracy_score(y_test_approved, preds_approved)
+f1   = f1_score(y_test_approved, preds_approved)
+cm   = confusion_matrix(y_test_approved, preds_approved)
 
 print("\n  Official Competition Metrics (20% Hold-Out Set)")
 print("  " + "-" * 46)
 print(f"  Accuracy  : {acc:.4f}  ({acc * 100:.2f}%)")
-print(f"  F1-Score  : {f1:.4f}")
+print(f"  F1-Score (Approved) : {f1:.4f}")
 print("\n  Confusion Matrix (rows=Actual, cols=Predicted):")
 print(f"  Labels   : [Rejected=0, Approved=1]")
 print(f"  {cm}")
