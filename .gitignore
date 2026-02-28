@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Model outputs — not needed in deployment
+outputs/
+
+# Local DB — ephemeral, no need to commit
+finaccess.db
+
+# Test/benchmark artifacts
+perf_metrics.json
+
+# Data files (large CSVs)
+train_u6lujuX_CVtuZ9i.csv
+test_Y3wMUE5_7gLdaTN.csv
+Dataset 2.csv
+test_predictions.csv

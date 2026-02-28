@@ -1,0 +1,18 @@
+[
+    "Gender",
+    "Married",
+    "Dependents",
+    "Education",
+    "Self_Employed",
+    "ApplicantIncome",
+    "CoapplicantIncome",
+    "LoanAmount",
+    "Loan_Amount_Term",
+    "Credit_History",
+    "Property_Area",
+    "Lag_LoanAmount_1",
+    "Lag_LoanAmount_2",
+    "Lag_LoanAmount_3",
+    "Lag_LoanAmount_4",
+    "Lag_LoanAmount_5"
+]
