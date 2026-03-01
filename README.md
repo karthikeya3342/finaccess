@@ -2,6 +2,8 @@
 
 > **NETRIK Hackathon 2026 · Track 0 · Team Status 200**
 
+[![View Final Submission Docs](https://img.shields.io/badge/📄_View_Official_Hackathon_Submission_Document_(_PDF_)-blue?style=for-the-badge)](finaccess%20%281%29.pdf)
+
 A production-grade credit risk scoring system that fuses **Graph Neural Networks (GCN)**, **XGBoost temporal modeling**, and **SHAP explainability** into a single FastAPI backend with a Streamlit admin dashboard.
 
 ---
