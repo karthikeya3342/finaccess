@@ -183,16 +183,18 @@ def run_shap_explanation(df_scaled: np.ndarray, feature_cols: list) -> Dict[str,
     if SHAP_EXPLAINER is None:
         return {"SHAP_Error": 0.0}
     try:
-        shap_values = SHAP_EXPLAINER.shap_values(df_scaled)  # (1, n_features) or list
-        # Binary classification: shap_values is a list [class0_vals, class1_vals]
+        shap_values = SHAP_EXPLAINER.shap_values(df_scaled)
+        
+        # XGBoost TreeExplainer returns a single array (n_samples, n_features) for binary classification
+        # representing the log-odds of the positive class (Class 1: Risk).
         if isinstance(shap_values, list):
-            vals = shap_values[1][0]   # class-1 = default/rejection risk
+            vals = shap_values[1][0]  # Fallback for Scikit-Learn style explainers
         else:
-            vals = shap_values[0]
+            vals = np.array(shap_values)[0]  # Native XGBoost style
 
         pairs = sorted(zip(feature_cols, vals.tolist()),
                        key=lambda x: abs(x[1]), reverse=True)
-        return {feat: round(val, 4) for feat, val in pairs[:5]}
+        return {feat: round(float(val), 4) for feat, val in pairs[:5]}
 
     except Exception as e:
         print(f"SHAP explanation failed: {e}")
