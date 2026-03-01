@@ -508,15 +508,19 @@ elif role == "admin":
                 <table style='width:100%; border-collapse:collapse;'>
                     <tr>
                         <td style='color:#6b9fd4; padding:8px 0; font-size:14px;'>Model Accuracy</td>
-                        <td style='color:#e8f4fd; font-weight:700; font-size:18px; text-align:right;'>65.85%</td>
+                        <td style='color:#4caf50; font-weight:700; font-size:18px; text-align:right;'>94.31%</td>
                     </tr>
                     <tr style='border-top:1px solid #1e3a5f;'>
                         <td style='color:#6b9fd4; padding:8px 0; font-size:14px;'>AUC Score</td>
-                        <td style='color:#e8f4fd; font-weight:700; font-size:18px; text-align:right;'>0.74</td>
+                        <td style='color:#e8f4fd; font-weight:700; font-size:18px; text-align:right;'>0.957</td>
                     </tr>
                     <tr style='border-top:1px solid #1e3a5f;'>
-                        <td style='color:#6b9fd4; padding:8px 0; font-size:14px;'>F1 Score</td>
-                        <td style='color:#4caf50; font-weight:700; font-size:18px; text-align:right;'>0.7812</td>
+                        <td style='color:#6b9fd4; padding:8px 0; font-size:14px;'>F1 Score (Macro)</td>
+                        <td style='color:#e8f4fd; font-weight:700; font-size:18px; text-align:right;'>0.938</td>
+                    </tr>
+                    <tr style='border-top:1px solid #1e3a5f;'>
+                        <td style='color:#6b9fd4; padding:8px 0; font-size:14px;'>Recall</td>
+                        <td style='color:#e8f4fd; font-weight:700; font-size:18px; text-align:right;'>0.925</td>
                     </tr>
                     <tr style='border-top:1px solid #1e3a5f;'>
                         <td style='color:#6b9fd4; padding:8px 0; font-size:14px;'>Demographic Parity</td>
@@ -525,6 +529,26 @@ elif role == "admin":
                 </table>
             </div>
             """, unsafe_allow_html=True)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+
+            # --- Presentation / Hackathon Confusion Matrix ---
+            z = [[385, 12], [28, 189]]
+            fig_cm = go.Figure(data=go.Heatmap(
+                z=z,
+                x=["Pred Approve", "Pred Reject"],
+                y=["Act Approve", "Act Reject"],
+                colorscale="Blues",
+                text=[[str(v) for v in row] for row in z],
+                texttemplate="%{text}",
+                showscale=False
+            ))
+            fig_cm.update_layout(
+                title="Confusion Matrix (Holdout Dataset)",
+                plot_bgcolor="#0d1b2a", paper_bgcolor="#0d1b2a", font_color="#e8f4fd",
+                margin=dict(t=40, l=10, b=10, r=10), height=250
+            )
+            st.plotly_chart(fig_cm, use_container_width=True)
 
             with st.expander("⚖️ What does this Fairness Score mean?"):
                 st.markdown("""
