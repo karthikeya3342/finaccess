@@ -291,12 +291,16 @@ def process_applicant(payload: ApplicantPayload) -> Dict[str, Any]:
     else:
         top_xai_features = {"Error": "Model not loaded"}
     
+    # Decision is Rejected if mathematically computed risk >= statistically derived threshold
+    decision = "Rejected" if final_risk >= OPTIMAL_THRESHOLD else "Approved"
+
     # Construct exact expected output schema
     result = {
         "Loan_ID":          loan_id,
         "Final_Risk_Score": round(float(final_risk), 4),
         "GCN_Score":        round(float(gcn_score),  4),
         "Temporal_Score":   round(float(temporal_score), 4),
+        "Decision":         decision,
         "Top_XAI_Features": top_xai_features
     }
 

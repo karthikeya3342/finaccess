@@ -255,7 +255,7 @@ if role == "applicant":
                 gcn_score      = data.get("GCN_Score", 0.0)
                 temporal_score = data.get("Temporal_Score", 0.0)
                 xai_features   = data.get("Top_XAI_Features", {})
-                is_approved    = final_risk < 0.5
+                is_approved    = data.get("Decision", "Approved") == "Approved"
 
                 st.markdown("---")
                 st.markdown("### 🎯 AI Decision Result")
@@ -281,12 +281,12 @@ if role == "applicant":
                     filtered_xai = {k: v for k, v in xai_features.items()
                                     if not k.startswith("Lag_")}
 
-                    # class-1 in this Loan dataset = Approved (Y=1)
-                    # → positive SHAP pushes toward Approved  → GREEN  "Supports Approval"
-                    # → negative SHAP pushes toward Rejected  → RED    "Increases Risk"
+                    # XGBoost was trained on Risk (Y=0 Approved, N=1 Rejected)
+                    # → positive SHAP pushes toward Risk      → RED    "Increases Risk"
+                    # → negative SHAP pushes toward Approval  → GREEN  "Supports Approval"
                     xai_df = pd.DataFrame([
                         {"Feature": k, "SHAP Value": v,
-                         "Direction": "Supports Approval" if v > 0 else "Increases Risk"}
+                         "Direction": "Increases Risk" if v > 0 else "Supports Approval"}
                         for k, v in sorted(filtered_xai.items(),
                                            key=lambda x: abs(x[1]), reverse=True)
                     ])
