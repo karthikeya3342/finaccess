@@ -21,7 +21,6 @@ from sklearn.model_selection import train_test_split, RandomizedSearchCV, cross_
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.neighbors import kneighbors_graph
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
-from sklearn.linear_model import LogisticRegression
 from torch_geometric.data import Data
 from torch_geometric.nn import GCNConv
 from xgboost import XGBClassifier
@@ -145,50 +144,51 @@ def build_graph_data(df_split: pd.DataFrame) -> Data:
     data.loan_ids   = loan_ids
     return data
 
-# Build training graph
-train_data = build_graph_data(train_df)
-num_nodes  = train_data.x.shape[0]
+# Build full graph (transductive learning)
+full_data = build_graph_data(df_full)
 
-# 80/20 internal node masks for GCN training
-idx      = np.arange(num_nodes); np.random.shuffle(idx)
-split    = int(num_nodes * 0.8)
-tr_mask  = torch.zeros(num_nodes, dtype=torch.bool); tr_mask[idx[:split]] = True
-val_mask = torch.zeros(num_nodes, dtype=torch.bool); val_mask[idx[split:]] = True
-train_data.train_mask = tr_mask; train_data.val_mask = val_mask
+num_nodes  = full_data.x.shape[0]
+
+# Create masks based on train/test split Loan_IDs
+train_ids = set(train_df['Loan_ID'].values)
+tr_mask = torch.tensor([lid in train_ids for lid in full_data.loan_ids], dtype=torch.bool)
+val_mask = ~tr_mask  # Test set is the validation mask for GCN
+
+full_data.train_mask = tr_mask
+full_data.val_mask = val_mask
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-train_data = train_data.to(device)
+full_data = full_data.to(device)
 
-gcn_model = RiskGCN(train_data.x.shape[1], 32, 2).to(device)
+gcn_model = RiskGCN(full_data.x.shape[1], 32, 2).to(device)
 opt = torch.optim.Adam(gcn_model.parameters(), lr=0.01, weight_decay=5e-4)
 
 gcn_model.train()
 for epoch in range(1, 201):
     opt.zero_grad()
-    out  = gcn_model(train_data.x, train_data.edge_index, train_data.edge_attr)
-    loss = F.cross_entropy(out[train_data.train_mask], train_data.y[train_data.train_mask])
+    out  = gcn_model(full_data.x, full_data.edge_index, full_data.edge_attr)
+    loss = F.cross_entropy(out[full_data.train_mask], full_data.y[full_data.train_mask])
     loss.backward(); opt.step()
     if epoch % 50 == 0:
         gcn_model.eval()
         with torch.no_grad():
-            val_out  = gcn_model(train_data.x, train_data.edge_index, train_data.edge_attr)
-            val_pred = val_out[train_data.val_mask].argmax(1)
-            val_acc  = (val_pred == train_data.y[train_data.val_mask]).float().mean().item()
-        print(f"  GCN Epoch {epoch:3d} | Loss: {loss.item():.4f} | Val Acc: {val_acc:.4f}")
+            val_out  = gcn_model(full_data.x, full_data.edge_index, full_data.edge_attr)
+            val_pred = val_out[full_data.val_mask].argmax(1)
+            val_acc  = (val_pred == full_data.y[full_data.val_mask]).float().mean().item()
+        print(f"  GCN Epoch {epoch:3d} | Loss: {loss.item():.4f} | Val (Test) Acc: {val_acc:.4f}")
         gcn_model.train()
 
-# Export GCN probabilities for the full TRAINING set as gcn_scores.json
+# Export GCN probabilities for the ENTIRE graph (train + test)
 gcn_model.eval()
 with torch.no_grad():
-    out   = gcn_model(train_data.x, train_data.edge_index, train_data.edge_attr)
-    probs = F.softmax(out, dim=1)
-    # Risk = P(class 0) — the rejection probability
-    risk  = probs[:, 0].cpu().numpy().astype(float)
+    full_probs = F.softmax(gcn_model(full_data.x, full_data.edge_index, full_data.edge_attr), dim=1)
+    # Risk = P(class 1) — the rejection probability
+    risk       = full_probs[:, 1].cpu().numpy()
 
-gcn_scores = {lid: float(r) for lid, r in zip(train_data.loan_ids, risk)}
+gcn_scores = {lid: float(r) for lid, r in zip(full_data.loan_ids, risk)}
 with open("gcn_scores.json", "w") as f:
     json.dump(gcn_scores, f, indent=4)
-print(f"\n  [+] gcn_scores.json written ({len(gcn_scores)} entries)")
+print(f"\n  [+] gcn_scores.json written ({len(gcn_scores)} entries - ALL DATA)")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -259,8 +259,13 @@ train_df['_y'] = train_df['Loan_Status'].map({'N': 1, 'Y': 0}).fillna(0).astype(
 X_train_scaled, le_dict, xgb_scaler, train_loan_ids_raw = prepare_xgb_df(train_df, fit=True)
 y_train = train_df['_y'].values
 
+# Apply scale_pos_weight natively to XGBoost to heavily penalize missing a Rejection
+num_neg = (y_train == 0).sum()
+num_pos = (y_train == 1).sum()
+scale_ratio = float(num_neg / num_pos) if num_pos > 0 else 1.0
+
 # 1. Hyperparameter Tuning using RandomizedSearchCV
-print("  [*] Running GridSearchCV for XGBoost hyperparameters...")
+print(f"  [*] Running GridSearchCV for XGBoost hyperparameters (scale_pos_weight={scale_ratio:.2f})...")
 param_dist = {
     'max_depth': [3, 4, 5, 6],
     'learning_rate': [0.01, 0.05, 0.1, 0.2],
@@ -269,38 +274,48 @@ param_dist = {
     'colsample_bytree': [0.6, 0.8, 1.0]
 }
 
-base_xgb = XGBClassifier(eval_metric='logloss', use_label_encoder=False, random_state=42)
+base_xgb = XGBClassifier(eval_metric='logloss', use_label_encoder=False, scale_pos_weight=scale_ratio, random_state=42)
 random_search = RandomizedSearchCV(base_xgb, param_distributions=param_dist, 
-                                   n_iter=20, cv=5, scoring='f1', n_jobs=-1, random_state=42)
+                                   n_iter=20, cv=5, scoring='f1_macro', n_jobs=-1, random_state=42)
 random_search.fit(X_train_scaled, y_train)
 
 xgb_model = random_search.best_estimator_
 print(f"  [+] Best XGB Params: {random_search.best_params_}")
 
-# 2. Extract OOF predictions for Fusion Model
-print("  [*] Computing Out-Of-Fold (OOF) predictions to train Fusion Model...")
+# 2. Extract OOF predictions for Fusion
+print("  [*] Computing Out-Of-Fold (OOF) predictions to tune Fusion Threshold...")
 oof_xgb_probs = cross_val_predict(xgb_model, X_train_scaled, y_train, cv=5, method='predict_proba')[:, 1]
 
 # Align GCN scores for the train set
 train_loan_ids_sorted = train_df.sort_values('Loan_ID')['Loan_ID'].values
 gcn_arr_train = np.array([gcn_scores.get(lid, 0.5) for lid in train_loan_ids_sorted])
 
-# 3. Learnable Fusion (Logistic Regression on [GCN, XGB] probabilities)
-print("  [*] Training Meta-Model (Learnable Fusion) on GCN & XGBoost scores...")
-X_meta_train = np.column_stack((gcn_arr_train, oof_xgb_probs))
+# 3. Deterministic Weighted Average Fusion (30% GCN / 70% XGBoost)
+print("  [*] Applying Weighted Average Fusion (30% Graph / 70% Temporal)...")
+oof_fusion_probs = (0.3 * gcn_arr_train) + (0.7 * oof_xgb_probs)
 
-# Find best threshold for Fusion Model alone on training data
-fusion_model = LogisticRegression(class_weight='balanced', random_state=42)
-fusion_model.fit(X_meta_train, y_train)
+# Tune optimal threshold on the FUSION probabilities to maximize F1 (Macro)
+best_thresh = 0.5
+best_f1 = 0.0
+for th in np.arange(0.2, 0.8, 0.01):
+    preds = (oof_fusion_probs >= th).astype(int)              # Class 1 (Risk) prediction
+    current_f1 = f1_score(y_train, preds, average='macro')
+    if current_f1 > best_f1:
+        best_f1 = current_f1
+        best_thresh = th
+
+print(f"  [+] Tuned Optimal Fusion Threshold: {best_thresh:.3f} (OOF Macro F1: {best_f1:.4f})")
 
 # Persist artefacts
 joblib.dump(xgb_model, "temporal_xgb_model.pkl")
-joblib.dump(fusion_model, "fusion_model.pkl")
 joblib.dump({'scaler': xgb_scaler, 'encoders': le_dict}, "preprocessing_pipeline.pkl")
 with open("feature_columns.json", "w") as f:
     json.dump(XGB_FEATURE_COLS, f, indent=4)
+
+with open("optimal_threshold.json", "w") as f:
+    json.dump({"threshold": float(best_thresh)}, f, indent=4)
     
-print("  [+] temporal_xgb_model.pkl, fusion_model.pkl, preprocessing_pipeline.pkl, feature_columns.json written")
+print("  [+] temporal_xgb_model.pkl, optimal_threshold.json, preprocessing_pipeline.pkl written")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -323,12 +338,17 @@ xgb_probs = xgb_model.predict_proba(X_test_scaled)[:, 1]   # P(default/rejection
 test_loan_ids = test_df.sort_values('Loan_ID')['Loan_ID'].values
 gcn_arr = np.array([gcn_scores.get(lid, 0.5) for lid in test_loan_ids])
 
-# Meta-Model Fusion prediction
-X_meta_test = np.column_stack((gcn_arr, xgb_probs))
-final_risk_probs = fusion_model.predict_proba(X_meta_test)[:, 1]
+# Weighted Average Fusion prediction
+final_risk_probs = (0.3 * gcn_arr) + (0.7 * xgb_probs)
 
-# Predict Class 1 (Risk) if probability > 0.5
-preds = (final_risk_probs >= 0.5).astype(int)
+print("\n  [DEBUG] Raw Probabilities (First 10):")
+print(f"  GCN: {gcn_arr[:10]}")
+print(f"  XGB: {xgb_probs[:10]}")
+print(f"  WA_FUSION: {final_risk_probs[:10]}")
+print(f"  BEST_THRESH: {best_thresh}")
+
+# Predict Class 1 (Risk) if probability >= tuned best_thresh
+preds = (final_risk_probs >= best_thresh).astype(int)
 
 # Invert for reporting purely so Y=Approved is treated as the "positive" class for F1
 # We want F1 for Approved correctly predicted. Since 0 = Approved, we invert 0->1, 1->0

@@ -30,7 +30,7 @@ XGB_MODEL = None
 PREPROCESSOR = None
 FEATURE_COLUMNS = []
 SHAP_EXPLAINER = None  # Initialized once at startup — reused for all requests (~5ms/call)
-FUSION_MODEL = None    # Meta-Model (Logistic Regression) for smart score fusion
+OPTIMAL_THRESHOLD = 0.5  # Learned from OOF F1 Macro Maximization
 
 # Initialize FastAPI app
 app = FastAPI(title="FinAccess Risk-Scoring Platform")
@@ -113,7 +113,7 @@ def init_db():
 @app.on_event("startup")
 def load_assets():
     """Load all models and assets into global memory at startup."""
-    global GCN_SCORES, XGB_MODEL, PREPROCESSOR, FEATURE_COLUMNS, SHAP_EXPLAINER, FUSION_MODEL
+    global GCN_SCORES, XGB_MODEL, PREPROCESSOR, FEATURE_COLUMNS, SHAP_EXPLAINER, OPTIMAL_THRESHOLD
 
     init_db()   # Ensure DB + table exist
     print("[*] Loading global assets...")
@@ -145,10 +145,11 @@ def load_assets():
         print("  - Warning: temporal_xgb_model.pkl not found.")
 
     try:
-        FUSION_MODEL = joblib.load("fusion_model.pkl")
-        print("  - Loaded fusion_model.pkl")
+        with open("optimal_threshold.json", "r") as f:
+            OPTIMAL_THRESHOLD = json.load(f).get("threshold", 0.5)
+        print(f"  - Loaded optimal_threshold.json (Threshold: {OPTIMAL_THRESHOLD:.3f})")
     except Exception:
-        print("  - Warning: fusion_model.pkl not found. Will fallback to harmonic mean.")
+        print("  - Warning: optimal_threshold.json not found. Defaulting to 0.5.")
 
     # Initialize SHAP TreeExplainer once at startup — reused for every request
     if XGB_MODEL is not None:
@@ -238,14 +239,8 @@ def process_applicant(payload: ApplicantPayload) -> Dict[str, Any]:
         # Assume probability of class 1 represents target Risk score
         temporal_score = float(probs[0][1] if probs.shape[1] > 1 else probs[0])
         
-    # Step C: Learnable Fusion (Meta-Model predicts final risk!)
-    # X_meta format expects: [gcn_score, xgb_score]
-    if FUSION_MODEL:
-        X_meta = np.array([[gcn_score, temporal_score]])
-        final_risk = float(FUSION_MODEL.predict_proba(X_meta)[0][1])  # Prob of Class 1 (Rejection/Risk)
-    else:
-        denom = gcn_score + temporal_score + 1e-8
-        final_risk = (2 * gcn_score * temporal_score) / denom
+    # Step C: Weighted Average Fusion (30% GCN / 70% XGBoost)
+    final_risk = (0.3 * gcn_score) + (0.7 * temporal_score)
     
     # Run SHAP explanation on the EXACT feature array passed to XGB
     if XGB_MODEL and 'df' in locals() and PREPROCESSOR:
@@ -263,8 +258,8 @@ def process_applicant(payload: ApplicantPayload) -> Dict[str, Any]:
     }
 
     # Persist to database (PostgreSQL on Render, SQLite locally)
-    # Decision is Approved if Risk < 0.5 (since Fusion Model outputs properly scaled probabilities)
-    decision = "Rejected" if final_risk >= 0.5 else "Approved"
+    # Decision is Rejected if mathematically computed risk >= statistically derived threshold
+    decision = "Rejected" if final_risk >= OPTIMAL_THRESHOLD else "Approved"
     ph = _ph()
     conn = None
     try:
