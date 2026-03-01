@@ -265,7 +265,12 @@ def process_applicant(payload: ApplicantPayload) -> Dict[str, Any]:
                 df[col] = le.transform(df[col].astype(str))
 
         # Enforce exact column order as required by the fitted Scaler and XGBoost
-        df = df[cols]
+        if hasattr(XGB_MODEL, "feature_names_in_"):
+            required_cols = list(XGB_MODEL.feature_names_in_)
+        else:
+            required_cols = FEATURE_COLUMNS  # Fallback
+            
+        df = df[required_cols]
         
         try:
             processed_x = scaler.transform(df) if scaler is not None else df.values
@@ -282,7 +287,7 @@ def process_applicant(payload: ApplicantPayload) -> Dict[str, Any]:
     
     # Run SHAP explanation on the EXACT feature array passed to XGB
     if XGB_MODEL and 'df' in locals() and PREPROCESSOR:
-        top_xai_features = run_shap_explanation(processed_x, cols)
+        top_xai_features = run_shap_explanation(processed_x, required_cols)
     else:
         top_xai_features = {"Error": "Model not loaded"}
     
