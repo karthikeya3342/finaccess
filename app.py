@@ -264,7 +264,15 @@ def process_applicant(payload: ApplicantPayload) -> Dict[str, Any]:
                 )
                 df[col] = le.transform(df[col].astype(str))
 
-        processed_x = scaler.transform(df) if scaler is not None else df.values
+        # Enforce exact column order as required by the fitted Scaler and XGBoost
+        df = df[cols]
+        
+        try:
+            processed_x = scaler.transform(df) if scaler is not None else df.values
+        except Exception as e:
+            print(f"[ERROR] Scaler Transform failed. Columns: {list(df.columns)}. Err: {e}")
+            processed_x = df.values
+            
         probs = XGB_MODEL.predict_proba(processed_x)
         # Assume probability of class 1 represents target Risk score
         temporal_score = float(probs[0][1] if probs.shape[1] > 1 else probs[0])
