@@ -34,13 +34,15 @@ CSV_PATH = "Dataset 2 (1).csv"
 # ──────────────────────────────────────────────────────────────
 # SHARED HELPERS
 # ──────────────────────────────────────────────────────────────
-CAT_COLS = ['Gender', 'Married', 'Dependents', 'Education',
-            'Self_Employed', 'Credit_History', 'Property_Area']
+CAT_COLS = ['Gender', 'Married', 'Education',
+            'Self_Employed', 'Property_Area']
 
 XGB_FEATURE_COLS = [
     'Gender', 'Married', 'Dependents', 'Education', 'Self_Employed',
     'ApplicantIncome', 'CoapplicantIncome', 'LoanAmount', 'Loan_Amount_Term',
     'Credit_History', 'Property_Area',
+    'TotalIncome', 'TotalIncome_log', 'LoanAmount_log', 'EMI', 'BalanceIncome',
+    'Credit_x_Income', 'Wealth_Factor',
     'Lag_LoanAmount_1', 'Lag_LoanAmount_2', 'Lag_LoanAmount_3',
     'Lag_LoanAmount_4', 'Lag_LoanAmount_5'
 ]
@@ -70,9 +72,15 @@ def engineer_gcn_features(df: pd.DataFrame) -> tuple:
                                      df['LoanAmount'] / df['Loan_Amount_Term'])
     df['BalanceIncome']   = df['TotalIncome'] - (df['EMI'] * 1000)
 
+    df['Dependents'] = df['Dependents'].replace({'3+': 3, '0': 0, '1': 1, '2': 2}).astype(float)
+    df['Credit_History'] = df['Credit_History'].astype(float)
+    df['Credit_x_Income'] = df['Credit_History'] * df['TotalIncome_log']
+    df['Wealth_Factor'] = np.where(df['EMI'] == 0, df['BalanceIncome'], df['BalanceIncome'] / (df['EMI'] + 1))
+
     cont_cols = ['ApplicantIncome', 'CoapplicantIncome', 'LoanAmount',
                  'Loan_Amount_Term', 'TotalIncome', 'TotalIncome_log',
-                 'LoanAmount_log', 'EMI', 'BalanceIncome']
+                 'LoanAmount_log', 'EMI', 'BalanceIncome',
+                 'Dependents', 'Credit_History', 'Credit_x_Income', 'Wealth_Factor']
 
     scaler   = StandardScaler()
     X_cont   = scaler.fit_transform(df[cont_cols])
@@ -80,7 +88,8 @@ def engineer_gcn_features(df: pd.DataFrame) -> tuple:
 
     y = None
     if 'Loan_Status' in df.columns:
-        y_raw = df['Loan_Status'].map({'Y': 1, 'N': 0}).fillna(0).astype(int)
+        # MAP: N=1 (Risk/Rejection), Y=0 (Safe/Approval). Matches XGBoost perfectly.
+        y_raw = df['Loan_Status'].map({'N': 1, 'Y': 0}).fillna(0).astype(int)
         y = torch.tensor(y_raw.values, dtype=torch.long)
     return X_cont, scaler, loan_ids, y
 
@@ -94,11 +103,14 @@ print("=" * 60)
 
 df_full = pd.read_csv(CSV_PATH)
 df_full = impute_df(df_full)
+df_full = df_full.sort_values('Loan_ID').reset_index(drop=True)
 
 train_df, test_df = train_test_split(df_full, test_size=0.20,
                                      random_state=42, stratify=df_full['Loan_Status'])
-train_df = train_df.reset_index(drop=True)
-test_df  = test_df.reset_index(drop=True)
+
+# CRITICAL: Sort by Loan_ID so that target arrays matches the temporal lag feature alignment
+train_df = train_df.sort_values('Loan_ID').reset_index(drop=True)
+test_df  = test_df.sort_values('Loan_ID').reset_index(drop=True)
 
 print(f"  Train rows : {len(train_df)}")
 print(f"  Test  rows : {len(test_df)}")
@@ -222,12 +234,20 @@ def prepare_xgb_df(df: pd.DataFrame,
         df['CoapplicantIncome'] = df['CoapplicantIncome'].clip(upper=df['CoapplicantIncome'].quantile(0.99))
         df['LoanAmount'] = df['LoanAmount'].clip(upper=df['LoanAmount'].quantile(0.99))
 
+    # Dependents to Numeric
+    df['Dependents'] = df['Dependents'].replace({'3+': 3, '0': 0, '1': 1, '2': 2}).astype(float)
+    df['Credit_History'] = df['Credit_History'].astype(float)
+
     # Feature Engineering for XGBoost (matching GCN's power)
     df['TotalIncome'] = df['ApplicantIncome'] + df['CoapplicantIncome']
     df['TotalIncome_log'] = np.log((df['TotalIncome'] + 1).astype(float))
     df['LoanAmount_log'] = np.log((df['LoanAmount'] + 1).astype(float))
     df['EMI'] = np.where(df['Loan_Amount_Term'] == 0, 0, df['LoanAmount'] / df['Loan_Amount_Term'])
     df['BalanceIncome'] = df['TotalIncome'] - (df['EMI'] * 1000)
+    
+    # Advanced Interactions
+    df['Credit_x_Income'] = df['Credit_History'] * df['TotalIncome_log']
+    df['Wealth_Factor'] = np.where(df['EMI'] == 0, df['BalanceIncome'], df['BalanceIncome'] / (df['EMI'] + 1))
 
     if fit:
         label_encoders = {}
@@ -290,21 +310,24 @@ oof_xgb_probs = cross_val_predict(xgb_model, X_train_scaled, y_train, cv=5, meth
 train_loan_ids_sorted = train_df.sort_values('Loan_ID')['Loan_ID'].values
 gcn_arr_train = np.array([gcn_scores.get(lid, 0.5) for lid in train_loan_ids_sorted])
 
-# 3. Deterministic Weighted Average Fusion (30% GCN / 70% XGBoost)
-print("  [*] Applying Weighted Average Fusion (30% Graph / 70% Temporal)...")
-oof_fusion_probs = (0.3 * gcn_arr_train) + (0.7 * oof_xgb_probs)
+# 3. Dynamic Weighted Average Fusion (Tuning Alpha & Threshold)
+print("  [*] Applying Dynamic Weighted Average Fusion (Grid Search over Alpha)...")
 
-# Tune optimal threshold on the FUSION probabilities to maximize F1 (Macro)
+best_alpha = 0.5
 best_thresh = 0.5
 best_f1 = 0.0
-for th in np.arange(0.2, 0.8, 0.01):
-    preds = (oof_fusion_probs >= th).astype(int)              # Class 1 (Risk) prediction
-    current_f1 = f1_score(y_train, preds, average='macro')
-    if current_f1 > best_f1:
-        best_f1 = current_f1
-        best_thresh = th
 
-print(f"  [+] Tuned Optimal Fusion Threshold: {best_thresh:.3f} (OOF Macro F1: {best_f1:.4f})")
+for alpha in np.arange(0.0, 1.05, 0.05):
+    oof_fusion_probs = (alpha * gcn_arr_train) + ((1.0 - alpha) * oof_xgb_probs)
+    for th in np.arange(0.2, 0.8, 0.01):
+        preds = (oof_fusion_probs >= th).astype(int)
+        current_f1 = f1_score(y_train, preds, average='macro')
+        if current_f1 > best_f1:
+            best_f1 = current_f1
+            best_thresh = th
+            best_alpha = alpha
+
+print(f"  [+] Tuned Optimal Fusion: {best_alpha:.2f} GCN / {1-best_alpha:.2f} XGB, Threshold: {best_thresh:.3f} (OOF Macro F1: {best_f1:.4f})")
 
 # Persist artefacts
 joblib.dump(xgb_model, "temporal_xgb_model.pkl")
@@ -313,7 +336,7 @@ with open("feature_columns.json", "w") as f:
     json.dump(XGB_FEATURE_COLS, f, indent=4)
 
 with open("optimal_threshold.json", "w") as f:
-    json.dump({"threshold": float(best_thresh)}, f, indent=4)
+    json.dump({"threshold": float(best_thresh), "alpha": float(best_alpha)}, f, indent=4)
     
 print("  [+] temporal_xgb_model.pkl, optimal_threshold.json, preprocessing_pipeline.pkl written")
 
@@ -339,7 +362,7 @@ test_loan_ids = test_df.sort_values('Loan_ID')['Loan_ID'].values
 gcn_arr = np.array([gcn_scores.get(lid, 0.5) for lid in test_loan_ids])
 
 # Weighted Average Fusion prediction
-final_risk_probs = (0.3 * gcn_arr) + (0.7 * xgb_probs)
+final_risk_probs = (best_alpha * gcn_arr) + ((1.0 - best_alpha) * xgb_probs)
 
 print("\n  [DEBUG] Raw Probabilities (First 10):")
 print(f"  GCN: {gcn_arr[:10]}")

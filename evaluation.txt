@@ -1,0 +1,55 @@
+﻿============================================================
+STEP 1 ù Loading and Splitting Dataset 2.csv (80/20)
+============================================================
+  Train rows : 491
+  Test  rows : 123
+
+============================================================
+STEP 2 ù Refitting Transductive GCN on 80% training split
+============================================================
+  GCN Epoch  50 | Loss: 0.5972 | Val (Test) Acc: 0.7073
+  GCN Epoch 100 | Loss: 0.5745 | Val (Test) Acc: 0.7317
+  GCN Epoch 150 | Loss: 0.5540 | Val (Test) Acc: 0.7398
+  GCN Epoch 200 | Loss: 0.5512 | Val (Test) Acc: 0.7317
+
+  [+] gcn_scores.json written (614 entries - ALL DATA)
+
+============================================================
+STEP 3 ù Hyperparameter Tuning & Optimal Threshold Finding
+============================================================
+  [*] Running GridSearchCV for XGBoost hyperparameters (scale_pos_weight=2.19)...
+  [+] Best XGB Params: {'subsample': 0.6, 'n_estimators': 100, 'max_depth': 4, 'learning_rate': 0.05, 'colsample_bytree': 1.0}
+  [*] Computing Out-Of-Fold (OOF) predictions to tune Fusion Threshold...
+  [*] Applying Cost-Sensitive Weighted Average Fusion (40% Graph / 60% Temporal)...
+  [+] Tuned Optimal Fusion Threshold (Cost-Sensitive): 0.200 (Min Cost: 346, OOF Macro F1: 0.2397)
+  [+] temporal_xgb_model.pkl, optimal_threshold.json, preprocessing_pipeline.pkl written
+
+============================================================
+STEP 4 ù Evaluating Learnable Fusion on 20% unseen test set
+============================================================
+
+  [DEBUG] Raw Probabilities (First 10):
+  GCN: [0.63917804 0.74094075 0.83361459 0.5615207  0.71910357 0.82327151
+ 0.64623016 0.77962607 0.88343829 0.90054321]
+  XGB: [0.3257407  0.42544267 0.28569663 0.4372603  0.30821264 0.55132073
+ 0.3571699  0.10664479 0.44816035 0.50764954]
+  WA_FUSION: [0.45111564 0.55164192 0.50486382 0.48696447 0.47256901 0.66010106
+ 0.47279401 0.37583731 0.62227154 0.66480703]
+  BEST_THRESH: 0.2
+
+  Official Competition Metrics (20% Hold-Out Set)
+  ----------------------------------------------
+  Accuracy  : 0.3171  (31.71%)
+  F1-Score (Approved) : 0.0233
+
+  Confusion Matrix (rows=Actual, cols=Predicted):
+  Labels   : [Rejected=0, Approved=1]
+  [[38  0]
+ [84  1]]
+
+  Breakdown:
+  True Negatives  (Correctly Rejected) : 38
+  False Positives (Wrongly Approved)   : 0
+  False Negatives (Wrongly Rejected)   : 84
+  True Positives  (Correctly Approved) : 1
+============================================================

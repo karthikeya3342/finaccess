@@ -31,6 +31,7 @@ PREPROCESSOR = None
 FEATURE_COLUMNS = []
 SHAP_EXPLAINER = None  # Initialized once at startup — reused for all requests (~5ms/call)
 OPTIMAL_THRESHOLD = 0.5  # Learned from OOF F1 Macro Maximization
+OPTIMAL_ALPHA = 0.5      # Learned weight for GCN vs XGBoost
 
 # Initialize FastAPI app
 app = FastAPI(title="FinAccess Risk-Scoring Platform")
@@ -113,7 +114,7 @@ def init_db():
 @app.on_event("startup")
 def load_assets():
     """Load all models and assets into global memory at startup."""
-    global GCN_SCORES, XGB_MODEL, PREPROCESSOR, FEATURE_COLUMNS, SHAP_EXPLAINER, OPTIMAL_THRESHOLD
+    global GCN_SCORES, XGB_MODEL, PREPROCESSOR, FEATURE_COLUMNS, SHAP_EXPLAINER, OPTIMAL_THRESHOLD, OPTIMAL_ALPHA
 
     init_db()   # Ensure DB + table exist
     print("[*] Loading global assets...")
@@ -146,8 +147,10 @@ def load_assets():
 
     try:
         with open("optimal_threshold.json", "r") as f:
-            OPTIMAL_THRESHOLD = json.load(f).get("threshold", 0.5)
-        print(f"  - Loaded optimal_threshold.json (Threshold: {OPTIMAL_THRESHOLD:.3f})")
+            t_data = json.load(f)
+            OPTIMAL_THRESHOLD = t_data.get("threshold", 0.5)
+            OPTIMAL_ALPHA = t_data.get("alpha", 0.5)
+        print(f"  - Loaded optimal_threshold.json (Threshold: {OPTIMAL_THRESHOLD:.3f}, Alpha: {OPTIMAL_ALPHA:.2f})")
     except Exception:
         print("  - Warning: optimal_threshold.json not found. Defaulting to 0.5.")
 
@@ -223,9 +226,36 @@ def process_applicant(payload: ApplicantPayload) -> Dict[str, Any]:
         scaler   = PREPROCESSOR.get('scaler')   if isinstance(PREPROCESSOR, dict) else PREPROCESSOR
         encoders = PREPROCESSOR.get('encoders', {}) if isinstance(PREPROCESSOR, dict) else {}
 
+        # Dependents numeric conversion
+        deps = str(df['Dependents'].iloc[0]).replace('3+', '3')
+        try:
+            deps_num = float(deps)
+        except:
+            deps_num = 0.0
+
+        df['Dependents'] = deps_num
+        
+        df['TotalIncome'] = df['ApplicantIncome'] + df['CoapplicantIncome']
+        df['TotalIncome_log'] = np.log((df['TotalIncome'] + 1).astype(float))
+        df['LoanAmount_log'] = np.log((df['LoanAmount'] + 1).astype(float))
+        emi = 0
+        if df['Loan_Amount_Term'].iloc[0] > 0:
+            emi = df['LoanAmount'].iloc[0] / df['Loan_Amount_Term'].iloc[0]
+        df['EMI'] = emi
+        df['BalanceIncome'] = df['TotalIncome'] - (emi * 1000)
+
+        # Advanced Interactions
+        try:
+            cred = float(df['Credit_History'].iloc[0])
+        except:
+            cred = 0.0
+        df['Credit_History'] = cred
+        df['Credit_x_Income'] = cred * df['TotalIncome_log']
+        df['Wealth_Factor'] = df['BalanceIncome'] if emi == 0 else df['BalanceIncome'] / (emi + 1)
+
         # Apply LabelEncoders to categorical columns before scaling
-        cat_cols = ['Gender', 'Married', 'Dependents', 'Education',
-                    'Self_Employed', 'Credit_History', 'Property_Area']
+        cat_cols = ['Gender', 'Married', 'Education',
+                    'Self_Employed', 'Property_Area']
         for col in cat_cols:
             if col in df.columns and col in encoders:
                 le = encoders[col]
@@ -239,8 +269,8 @@ def process_applicant(payload: ApplicantPayload) -> Dict[str, Any]:
         # Assume probability of class 1 represents target Risk score
         temporal_score = float(probs[0][1] if probs.shape[1] > 1 else probs[0])
         
-    # Step C: Weighted Average Fusion (30% GCN / 70% XGBoost)
-    final_risk = (0.3 * gcn_score) + (0.7 * temporal_score)
+    # Step C: Dynamic Weighted Average Fusion
+    final_risk = (OPTIMAL_ALPHA * gcn_score) + ((1.0 - OPTIMAL_ALPHA) * temporal_score)
     
     # Run SHAP explanation on the EXACT feature array passed to XGB
     if XGB_MODEL and 'df' in locals() and PREPROCESSOR:
