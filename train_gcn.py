@@ -196,7 +196,7 @@ def export_risk_scores(model, data, device, output_file="gcn_scores.json"):
     print(f"[+] Total entries embedded: {len(gcn_scores)}")
 
 if __name__ == "__main__":
-    csv_path = 'train_u6lujuX_CVtuZ9i.csv'
+    csv_path = 'Dataset 2 (1).csv'
     if not os.path.exists(csv_path):
         print(f"Error: Could not find {csv_path} in the current directory.")
         exit(1)

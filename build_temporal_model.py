@@ -146,7 +146,7 @@ def predict_temporal_risk(feature_array: np.ndarray, model) -> float:
 
 if __name__ == "__main__":
     # Simulate execution on the provided dataset
-    csv_file = "train_u6lujuX_CVtuZ9i.csv"  # The file found in the workspace
+    csv_file = "Dataset 2 (1).csv"  # The file found in the workspace
     
     model, features = train_temporal_model(csv_file)
     
