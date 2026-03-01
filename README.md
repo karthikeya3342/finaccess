@@ -8,43 +8,6 @@ A production-grade credit risk scoring system that fuses **Graph Neural Networks
 
 ---
 
-## 🏗️ System Architecture
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                   STREAMLIT FRONTEND                    │
-│   Applicant Portal  │  Admin Dashboard  │  Audit Log   │
-└─────────────────────────────┬───────────────────────────┘
-                              │ REST API (HTTP)
-┌─────────────────────────────▼───────────────────────────┐
-│                   FASTAPI BACKEND                        │
-│                                                          │
-│   POST /score_applicant      GET /admin/applications     │
-│                                                          │
-│   ┌──────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│   │ GCN Score│  │ XGBoost      │  │  SHAP            │  │
-│   │ (O(1)    │  │ Temporal     │  │  TreeExplainer   │  │
-│   │  Lookup) │  │ Model        │  │  (~5ms/request)  │  │
-│   └────┬─────┘  └──────┬───────┘  └──────────────────┘  │
-│        └───────────────┤                                  │
-│              ┌─────────▼──────────┐                      │
-│              │  Harmonic Mean     │                      │
-│              │  Fusion            │                      │
-│              │  2·gcn·xgb         │                      │
-│              │  ──────────────    │                      │
-│              │  gcn + xgb         │                      │
-│              └─────────┬──────────┘                      │
-└────────────────────────┼────────────────────────────────┘
-                         │
-              ┌──────────▼──────────┐
-              │   PostgreSQL DB     │
-              │   (Render /         │
-              │    SQLite local)    │
-              └─────────────────────┘
-```
-
----
-
 ## ✨ Key Features
 
 | Feature | Description |
@@ -201,65 +164,6 @@ Returns the 50 most recent scored applications from the database.
 
 ---
 
-## 🧠 Model Architecture
-
-### 1. Graph Neural Network (GCN)
-
-- **Graph Construction:** KNN graph (k=5) built from applicant financial features using Euclidean distance; edge weights = inverse distance
-- **Architecture:** 2-layer `GCNConv` (PyTorch Geometric) with hidden size 16, dropout 0.5
-- **Training:** 100 epochs, Adam optimizer (lr=0.01), 80/20 train/val split
-- **Output:** Per-applicant risk probabilities exported to `gcn_scores.json` for O(1) runtime lookup
-- **Inference:** Dictionary lookup — no graph computation at request time
-
-### 2. XGBoost Temporal Model
-
-- **Features:** 11 base features + 5 lag features (`Lag_LoanAmount_1` through `_5`)
-- **Preprocessing:** LabelEncoding for categoricals, StandardScaler
-- **Purpose:** Captures temporal financial pattern signals alongside static features
-
-### 3. Harmonic Mean Fusion
-
-```python
-final_risk = (2 × gcn_score × temporal_score) / (gcn_score + temporal_score)
-```
-
-The harmonic mean penalises cases where either model is highly uncertain (near 0.5), producing a more conservative and calibrated final score.
-
----
-
-## 📊 Model Performance
-
-| Metric | Value |
-|---|---|
-| Accuracy | 65.85% |
-| AUC-ROC | 0.74 |
-| F1 Score | 0.7812 |
-| Demographic Parity (Disparate Impact) | **0.92** ✅ |
-
----
-
-## ⚖️ Fairness Evaluation
-
-Evaluated using the **EEOC 80% Rule (Disparate Impact):**
-
-```
-Disparate Impact = Approval Rate (Female) / Approval Rate (Male)
-```
-
-| Group | Approval Rate |
-|---|---|
-| Male | Privileged baseline |
-| Female | Compared against male |
-
-**Result: 0.92** — exceeds the 0.80 industry compliance threshold.
-
-Run the fairness audit locally:
-```bash
-python evaluate_fairness.py
-```
-
----
-
 ## 🚀 Load Testing
 
 ```bash
@@ -267,16 +171,6 @@ python test_concurrency.py
 ```
 
 Fires **100 unique concurrent requests** against the `/score_applicant` endpoint and writes results to `perf_metrics.json`.
-
-**Measured Results (100 concurrent users, 100 workers):**
-
-| Metric | Value |
-|---|---|
-| Total Wall Time | 5.84s |
-| Throughput | 17.12 RPS |
-| Avg Latency | 3036.3 ms |
-| P95 Latency | 5564.7 ms |
-| Success Rate | 100% (100/100) |
 
 ---
 
