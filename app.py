@@ -186,11 +186,12 @@ def run_shap_explanation(df_scaled: np.ndarray, feature_cols: list) -> Dict[str,
         shap_values = SHAP_EXPLAINER.shap_values(df_scaled)
         
         # XGBoost TreeExplainer returns a single array (n_samples, n_features) for binary classification
-        # representing the log-odds of the positive class (Class 1: Risk).
+        # Because we previously mapped (N=1, Y=0) to predict Risk, we must mathematically invert the SHAP array 
+        # so that positive features (Income) naturally map to 'Supports Approval' (Green/Negative direction) in the UI.
         if isinstance(shap_values, list):
-            vals = shap_values[1][0]  # Fallback for Scikit-Learn style explainers
+            vals = shap_values[1][0] * -1 # Fallback for Scikit-Learn style explainers
         else:
-            vals = np.array(shap_values)[0]  # Native XGBoost style
+            vals = np.array(shap_values)[0] * -1  # Native XGBoost style
 
         pairs = sorted(zip(feature_cols, vals.tolist()),
                        key=lambda x: abs(x[1]), reverse=True)

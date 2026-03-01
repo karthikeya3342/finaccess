@@ -281,7 +281,7 @@ if role == "applicant":
                     filtered_xai = {k: v for k, v in xai_features.items()
                                     if not k.startswith("Lag_")}
 
-                    # XGBoost was trained on Risk (Y=0 Approved, N=1 Rejected)
+                    # Since `app.py` mathematically inverts the SHAP coefficients to match human intuition:
                     # → positive SHAP pushes toward Risk      → RED    "Increases Risk"
                     # → negative SHAP pushes toward Approval  → GREEN  "Supports Approval"
                     xai_df = pd.DataFrame([
